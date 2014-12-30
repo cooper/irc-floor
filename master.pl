@@ -12,7 +12,7 @@ use List::Util   'shuffle';
 use Scalar::Util 'weaken';
 use JSON qw(encode_json decode_json);
 
-our $VERSION = 0.1;
+our $VERSION = 0.2;
 
 my (@nicks, %nick_used, $nick_num, %branches, $in_cmd);
 my %config = (
@@ -112,25 +112,18 @@ sub unfortunately { &honestly }
 sub handle_stdin {
     my ($stream, $buffer) = @_;
     while ($$buffer =~ s/^(.*)\r*\n+//) {
-        $in_cmd = 1;
-        
-        # handle as command.
+        $in_cmd   = 1;
         my @split = split /\s+/, $1;
         my $cmd   = shift @split or next;
            $cmd   = 'help' if $cmd eq '?' or $cmd eq 'commands';
-        if (my $code = __PACKAGE__->can("cmd_$cmd")) { $code->(@split) }
         
-        # unknown command. fall back to shell.
-        else {
-            my $bad;
-            my $exec = eval { local $SIG{__WARN__} = sub { $bad = 1 }; `$1` };
-            if (!defined $exec || $bad) {
-                unfortunately 'huh';
-                next;
-            }
-            well map { "| $_\n" } split "\n", $exec;
+        # exists.
+        if (my $code = __PACKAGE__->can("cmd_$cmd")) {
+            $code->(@split);
+            next;
         }
         
+        unfortunately 'huh';
     }
     continue {
         accept_command();
@@ -138,14 +131,16 @@ sub handle_stdin {
     }
 }
 
+# show environment info.
 sub cmd_sysinfo {
     well
-    "this is floor $VERSION\n",
-    "powered by perl ", $^V, " on ", ucfirst $^O, "\n",
+    "this is floor v$VERSION\n",
+    "running on perl ", $^V, " on ", ucfirst $^O, "\n",
     "your dictionary $config{word_list} has $$wl{size} entries\n",
     "All your floor are belong to us";
 }
 
+# test nickname dictionary.
 sub cmd_wastenick {
     my $nick = get_nickname();
     well
@@ -154,6 +149,7 @@ sub cmd_wastenick {
     scalar @nicks, " more in RAM\n and probably lots more in the dictionary";
 }
 
+# spawn enough branches to create x clients.
 sub cmd_create {
     my ($pp, $b) = ($config{clients_per_branch}, scalar keys %branches);
     my $wanted = shift || $pp;
@@ -168,11 +164,13 @@ sub cmd_create {
     cmd_spawn($branches);
 }
 
+# spawn a branch.
 sub cmd_spawn {
     my $count = shift || 1;
     new_branch() for 1..$count;
 }
 
+# show current branches.
 sub cmd_show {
     well_map(map {
         my $b = $branches{$_};
@@ -182,6 +180,7 @@ sub cmd_show {
     } keys %branches);
 }
 
+# set or show configuration values.
 sub cmd_set {
     my ($key, $value) = (shift, join ' ', @_);
     if (!length $key && !length $value) {
@@ -198,19 +197,43 @@ sub cmd_set {
     well_map($key => exists $config{$key} ? $config{$key} // 'undef' : 'nonexistent');
 }
 
+# send privmsg to channel(s).
 sub cmd_say {
-    my @channels = substr($_[0], 0, 1) eq '#' ? (shift) : @{ $config{autojoin} };
+    required_params(1, @_) or return;
+    my @channels = &get_channels;
     my $message = join ' ', @_;
-    send_all(raw => {
-        data        => "PRIVMSG $_ :$message",
-        joined_only => 1
-    }) foreach @channels;
+    send_cmd_joined("PRIVMSG $_ :$message") foreach @channels;
 }
 
+# part and join channel(s).
+sub cmd_cycle {
+    my @channels = &get_channels;
+    my $message = join ' ', @_;
+    send_cmd_all("PART $_ :$message", "JOIN $_") foreach @channels;
+}
+
+# send raw IRC data.
 sub cmd_irc {
-    my $data = shift;
-    return well "you must supply data to send" if !length $data;;
+    my ($data) = required_params(1, @_) or return;
     send_all(raw => { data => $data });
+}
+
+# get channels from command or fall back to autojoin channels.
+sub get_channels {
+    return $_[0] && substr($_[0], 0, 1) eq '#' ?
+        split /\,/, shift :
+        @{ $config{autojoin} };
+}
+
+# show error if not enough args.
+sub required_params {
+    my ($n, @args) = @_;
+    if (@args < $n) {
+        my $s = $n > 1 ? 's' : '';
+        unfortunately("command requires $n parameter$s");
+        return;
+    }
+    return @args;
 }
 
 sub cmd_help {
@@ -219,6 +242,7 @@ sub cmd_help {
         spawn       => 'spawn additional branch(es): [amount]',
         create      => 'shortcut for spawn: number of users',
         say         => 'send a message to IRC channel(s): [#channel] message',
+        cycle       => 'part and join IRC channel(s): [#channel] [part message]',
         irc         => 'send raw data to all active connections',
         set         => 'set or show a configuration value: [key [value]]',
         sysinfo     => 'show information about the operating environment',
@@ -255,7 +279,7 @@ sub new_branch {
         command   => [ qw(perl branch.pl) ],
         stdout    => { on_read => \&handle_branch     },
         stderr    => { on_read => \&handle_branch_err },
-        stdin     => { via => "pipe_write"            },
+        stdin     => { via     => 'pipe_write'        },
         on_finish => sub {
             my ($branch, $code) = @_;
             unfortunately $branch->pid, " exited with code $code";
@@ -303,6 +327,16 @@ sub send_to {
 
 sub send_all {
     send_to($_, @_) foreach values %branches; 
+}
+
+# send IRC command(s) on all clients.
+sub send_cmd_all {
+    send_all(raw => { data => $_ }) foreach @_;
+}
+
+# send IRC command(s) on joined clients.
+sub send_cmd_joined {
+    send_all(raw => { data => $_, joined_only => 1 }) foreach @_;
 }
 
 ############################

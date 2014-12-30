@@ -114,7 +114,6 @@ sub new_connection {
 
 sub connection_done {
     my $stream = shift;
-    honestly "wow $stream died";
     delete $connections{$stream};
     delete $not_joined{$stream};
     delete $joined{$stream};
