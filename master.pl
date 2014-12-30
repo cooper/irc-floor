@@ -12,7 +12,7 @@ use List::Util   'shuffle';
 use Scalar::Util 'weaken';
 use JSON qw(encode_json decode_json);
 
-our $VERSION = 0.3;
+our $VERSION = 0.4;
 
 ######################
 ### Initialization ###
@@ -22,7 +22,7 @@ my (@nicks, %nick_used, $nick_num, %branches, $in_cmd);
 my %config = (
     clients_per_branch  => 100,
     spaced_output       => undef,
-    max_nicks_in_ram    => 50000,
+    max_nicks_in_ram    => 5000,
     address             => '127.0.0.1',
     port                => 6667,
     pong_timer          => 30,
@@ -54,9 +54,9 @@ sub setup {
     
     # initial info.
     cmd_sysinfo();
-    cmd_set();
     well(
         "IRC server is $config{address}\n",
+        "type @ to view configuration\n",
         'type ? for help'
     );
     
@@ -143,18 +143,25 @@ sub unfortunately { &honestly }
 sub handle_stdin {
     my ($stream, $buffer) = @_;
     while ($$buffer =~ s/^(.*)\r*\n+//) {
+        my $line  = $1;
         $in_cmd   = 1;
-        my @split = split /\s+/, $1;
+        my @split = split /\s+/, $line;
         my $cmd   = shift @split or next;
-           $cmd   = 'help' if $cmd eq '?' or $cmd eq 'commands';
+            $cmd  = 'help'  if $cmd eq '?' or $cmd eq 'commands';
+            _set() and next if $cmd eq '@';
         
-        # exists.
-        if (my $code = __PACKAGE__->can("cmd_$cmd")) {
+        # variable.
+        if    ($line =~ m/^\@(\w+)$/)            { _set($1)     }
+        elsif ($line =~ m/^\@(\w+)\s*=\s*(.+)$/) { _set($1, $2) }
+        
+        # command.
+        elsif (my $code = __PACKAGE__->can("cmd_$cmd")) {
             $code->(@split);
-            next;
         }
         
-        unfortunately 'huh';
+        # unknown.
+        else { unfortunately 'huh' }
+        
     }
     continue {
         accept_command();
@@ -212,10 +219,15 @@ sub cmd_show {
 }
 
 # set or show configuration values.
-sub cmd_set {
+sub _set {
     my ($key, $value) = (shift, join ' ', @_);
     if (!length $key && !length $value) {
-        return well_map(%config);
+        well_map(map { '@'.$_ => $config{$_} } keys %config);
+        well
+            "type sethelp for explanation\n",
+            "set configuration values with: ",
+            "\@key = value";
+        return 1;
     }
     if (length $value) {
         $value = undef if $value eq 'undef';
@@ -226,7 +238,7 @@ sub cmd_set {
         send_all(config => \%config);
         save();
     }
-    well_map($key => exists $config{$key} ? $config{$key} // 'undef' : 'nonexistent');
+    well_map('@'.$key => exists $config{$key} ? $config{$key} // 'undef' : 'nonexistent');
 }
 
 # send privmsg to channel(s).
@@ -270,7 +282,6 @@ sub required_params {
 
 sub cmd_help {
     well_map(
-        set         => 'set or show a configuration value: [key [value]]',
         show        => 'show a status overview of current branches',
         spawn       => 'spawn additional branch(es): [amount]',
         create      => 'shortcut for spawn: desired number of clients',
@@ -285,7 +296,7 @@ sub cmd_help {
 }
 
 sub cmd_sethelp {
-    well_map(
+    my %c = (
         address             => ' str) address of the IRC server',
         port                => ' str) port of the IRC server',
         autojoin            => 'list) channels to join automatically',
@@ -298,6 +309,7 @@ sub cmd_sethelp {
         word_list           => ' str) path to dictionary file on the system',
         spaced_output       => 'bool) format table output in a more spaced layout'
     );
+    well_map(map { '@'.$_ => $c{$_} } keys %c);
 }
 
 #########################
