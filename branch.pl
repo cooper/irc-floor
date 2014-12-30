@@ -10,7 +10,7 @@ use IO::Async::Timer::Periodic;
 use JSON qw(encode_json decode_json);
 
 my ($pong_timer, $join_timer, $updt_timer, $conn_timer);
-my (%config, @nicks, %connections, %not_joined, %joined);
+my (%config, @nicks, %connections, %not_joined, %joined, $started);
 
 $SIG{PIPE} = sub {};
 
@@ -60,11 +60,14 @@ sub m_config {
     $join_timer->{interval} = $config{join_timer};
     $pong_timer->{interval} = $config{pong_timer};
 }
+
 sub m_nicks  { @nicks = @{ +shift } }
 
 sub m_start {
+    return if $started;
     $conn_timer->start;
     $loop->add($conn_timer);
+    $started = 1;
 }
 
 sub m_raw {
@@ -171,7 +174,7 @@ sub conn_timer {
     while (my $nick = shift @nicks) {
         $i++;
         new_connection($nick);
-        last if $i == 50;
+        last if $i == $config{connections_in_row};
     }
 }
 

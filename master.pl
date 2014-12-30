@@ -8,17 +8,17 @@ use IO::Async::Loop;
 use IO::Async::Stream;
 use IO::Async::Process;
 use Data::Random::WordList;
-use List::Util   'shuffle';
-use Scalar::Util 'weaken';
+use List::Util   qw(shuffle sum);
+use Scalar::Util qw(weaken looks_like_number);
 use JSON qw(encode_json decode_json);
 
-our $VERSION = 0.4;
+our $VERSION = 0.5;
 
 ######################
 ### Initialization ###
 ######################
 
-my (@nicks, %nick_used, $nick_num, %branches, $in_cmd);
+my (@nicks, %nick_used, $nick_num, %branches, $in_cmd, $not_full);
 my %config = (
     clients_per_branch  => 100,
     spaced_output       => undef,
@@ -189,23 +189,44 @@ sub cmd_wastenick {
 
 # spawn enough branches to create x clients.
 sub cmd_create {
-    my ($pp, $b) = ($config{clients_per_branch}, scalar keys %branches);
-    my $wanted = shift || $pp;
-    my ($branches, $total) = (0, 0);
-    until ($total >= $wanted) {
-        $branches++;
-        $total += $pp;
+    my ($create_n) = required_params(1, @_) or return;
+    requires_number($create_n) or return;
+    my $per_branch = $config{clients_per_branch};
+    
+    # create full branches.
+    my $branches_needed = int($create_n / $per_branch);
+    new_branch() for 1 .. $branches_needed;
+    
+    # create a last branch with the rest.
+    if (($branches_needed + 1) * $per_branch > $create_n) {
+        my $leftover = $create_n - $branches_needed * $per_branch;
+        
+        # see if we can squeeze any into one that's not full.
+        if ($not_full) {
+            my $can_fit = $per_branch - $not_full->{clients};
+            $can_fit = $leftover if $can_fit > $leftover; # can fit more than needed
+            introduce($not_full, $can_fit);
+            $leftover -= $can_fit;
+        }
+        
+        # still some left over. create another branch.
+        if ($leftover > 0) {
+            $not_full = new_branch($leftover);
+            $branches_needed++;
+        }
+        
     }
-    $b += $branches;
-    well "spawning $branches branches to create $total clients\n",
-         "current total capacity is ", $pp * $b," clients on $b branches";
-    cmd_spawn($branches);
+    
+    my $total_br = scalar keys %branches;
+    my $capacity = sum map $_->{clients}, values %branches;
+    well "spawning $branches_needed branches to create $create_n clients\n",
+         "current total capacity is $capacity clients on $total_br branches";
 }
 
 # spawn a branch.
 sub cmd_spawn {
-    my $count = shift || 1;
-    new_branch() for 1..$count;
+    my $count = requires_number(shift || 1) or return;
+    new_branch() for 1 .. $count;
 }
 
 # show current branches.
@@ -280,11 +301,19 @@ sub required_params {
     return @args;
 }
 
+# show an error if not a number.
+sub requires_number {
+    my $n = shift;
+    return $n if looks_like_number($n);
+    unfortunately('expected a number');
+    return;
+}
+
 sub cmd_help {
     well_map(
         show        => 'show a status overview of current branches',
+        create      => 'create additional clients: [amount]',
         spawn       => 'spawn additional branch(es): [amount]',
-        create      => 'shortcut for spawn: desired number of clients',
         say         => 'send a message to IRC channel(s): [#channel] message',
         cycle       => 'part and join IRC channel(s): [#channel] [part message]',
         irc         => 'send raw data to all active connections',
@@ -317,6 +346,7 @@ sub cmd_sethelp {
 #########################
 
 sub new_branch {
+    my $client_n = shift // $config{clients_per_branch};
 
     # create the process.
     my $branch = IO::Async::Process->new(
@@ -340,22 +370,24 @@ sub new_branch {
     # hold onto it.
     $branches{ $branch->pid } = $branch;
     $branch->stdout->{branch} = $branch;
+    $branch->{clients} = 0;
 
     # say hello.
-    introduce($branch);
+    introduce($branch, $client_n);
     
     return $branch;
 }
 
 sub introduce {
-    my $branch = shift;
+    my ($branch, $client_n) = @_;
+    $branch->{clients} += $client_n;
     
     # send configuration values.
     send_to($branch, config => \%config);
     
     # allocate a lot of nicknames.
     my @b_nicks;
-    push @b_nicks, get_nickname() for 1..$config{clients_per_branch};
+    push @b_nicks, get_nickname() for 1 .. $client_n;
     send_to($branch, nicks => \@b_nicks);
     
     # begin.
@@ -435,4 +467,6 @@ sub get_nickname {
     return $nick;
 }
 
-sub valid_nick { shift() =~ m/^[A-Za-z_`\-^\|\\\{}\[\]][A-Za-z_0-9`\-^\|\\\{}\[\]]*$/ }
+sub valid_nick {
+    return shift() =~ m/^[A-Za-z_`\-^\|\\\{}\[\]][A-Za-z_0-9`\-^\|\\\{}\[\]]*$/;
+}
