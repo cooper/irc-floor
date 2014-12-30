@@ -12,7 +12,7 @@ use List::Util   qw(shuffle sum);
 use Scalar::Util qw(weaken looks_like_number);
 use JSON qw(encode_json decode_json);
 
-our $VERSION = 0.5;
+our $VERSION = 0.6;
 
 ######################
 ### Initialization ###
@@ -277,6 +277,29 @@ sub cmd_cycle {
     send_cmd_all("PART $_ :$message", "JOIN $_") foreach @channels;
 }
 
+# change nicknames.
+sub cmd_changenick { &cmd_nickchange }
+sub cmd_nickchange {
+    
+    # do multiple times?
+    my $times = shift;
+    requires_number($times) or return if $times;
+    my $n = 0;
+    
+    $times ||= 1;
+    ROUND: for (1 .. $times) {
+        BRANCH: foreach my $b (values %branches) {
+            next BRANCH unless $b->{joined};
+            # note: $b->{joined} may be inaccurate by up to three seconds.
+            my @new_nicks = map { get_nickname() } 1 .. $b->{joined};
+            $n += $b->{joined};
+            send_to($b, nickchange => { nicks => \@new_nicks });
+        }
+    }
+    
+    well "$n nicks changed";
+}
+
 # send raw IRC data.
 sub cmd_irc {
     my ($data) = required_params(1, @_) or return;
@@ -316,6 +339,7 @@ sub cmd_help {
         spawn       => 'spawn additional branch(es): [amount]',
         say         => 'send a message to IRC channel(s): [#channel] message',
         cycle       => 'part and join IRC channel(s): [#channel] [part message]',
+        nickchange  => 'randomly change client nicknames: [times]',
         irc         => 'send raw data to all active connections',
         sysinfo     => 'show information about the operating environment',
         wastenick   => 'waste a nickname to test if the source is functioning',

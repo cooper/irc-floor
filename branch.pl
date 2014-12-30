@@ -61,7 +61,15 @@ sub m_config {
     $pong_timer->{interval} = $config{pong_timer};
 }
 
-sub m_nicks  { @nicks = @{ +shift } }
+sub m_nicks { @nicks = @{ +shift } }
+
+sub m_nickchange {
+    my @nicks = @{ shift->{nicks} };
+    foreach my $s (values %joined) {
+        my $nick = pop @nicks or last;
+        $s->write("NICK $nick\r\n");
+    }
+}
 
 sub m_start {
     return if $started;
@@ -139,7 +147,7 @@ sub create_timers {
     );
 
     $updt_timer = IO::Async::Timer::Periodic->new(
-        interval => 10,
+        interval => 3,
         on_tick  => \&update_info
     );
 
