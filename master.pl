@@ -12,7 +12,11 @@ use List::Util   'shuffle';
 use Scalar::Util 'weaken';
 use JSON qw(encode_json decode_json);
 
-our $VERSION = 0.2;
+our $VERSION = 0.3;
+
+######################
+### Initialization ###
+######################
 
 my (@nicks, %nick_used, $nick_num, %branches, $in_cmd);
 my %config = (
@@ -29,6 +33,7 @@ my %config = (
     word_list           => '/usr/share/dict/words'
 );
 
+my $conf = "$ENV{HOME}/.floorrc";
 my $wl   = Data::Random::WordList->new(wordlist => $config{word_list});
 my $loop = IO::Async::Loop->new;
 my $std  = IO::Async::Stream->new_for_stdio(on_read => \&handle_stdin);
@@ -37,14 +42,40 @@ setup();
 $loop->loop_forever;
 
 sub setup {
+    $loop->add($std);
 
+    # load configuration.
+    load();
+    
     # determine how many nicks to load.
     $nick_num = $wl->{size};
     my $maxn = $config{max_nicks_in_ram};
     $nick_num = $maxn if $nick_num >= $maxn;
     
-    $loop->add($std);
+    # initial info.
+    cmd_sysinfo();
+    cmd_set();
+    well(
+        "IRC server is $config{address}\n",
+        'type ? for help'
+    );
+    
     accept_command();
+}
+
+sub load {
+    return unless -f $conf;
+    local $/ = undef;
+    open my $fh, '<', $conf or return;
+    my $saved = decode_json(<$fh>);
+    close $fh;
+    @config{ keys %$saved } = values %$saved;
+}
+
+sub save {
+    open my $fh, '>', $conf or unfortunately("can't save configuration: $!") and return;
+    print $fh encode_json(\%config);
+    close $fh;
 }
 
 ##############
@@ -193,6 +224,7 @@ sub cmd_set {
             $value =~ m/\{.*\}|\[.*\]/;
         $config{$key} = $value;
         send_all(config => \%config);
+        save();
     }
     well_map($key => exists $config{$key} ? $config{$key} // 'undef' : 'nonexistent');
 }
@@ -238,13 +270,13 @@ sub required_params {
 
 sub cmd_help {
     well_map(
+        set         => 'set or show a configuration value: [key [value]]',
         show        => 'show a status overview of current branches',
         spawn       => 'spawn additional branch(es): [amount]',
-        create      => 'shortcut for spawn: number of users',
+        create      => 'shortcut for spawn: desired number of clients',
         say         => 'send a message to IRC channel(s): [#channel] message',
         cycle       => 'part and join IRC channel(s): [#channel] [part message]',
         irc         => 'send raw data to all active connections',
-        set         => 'set or show a configuration value: [key [value]]',
         sysinfo     => 'show information about the operating environment',
         wastenick   => 'waste a nickname to test if the source is functioning',
         sethelp     => 'explain what each configuration value means',
