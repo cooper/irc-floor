@@ -12,7 +12,7 @@ use List::Util   qw(shuffle sum);
 use Scalar::Util qw(weaken looks_like_number);
 use JSON qw(encode_json decode_json);
 
-our $VERSION = 0.6;
+our $VERSION = 0.61;
 
 ######################
 ### Initialization ###
@@ -302,8 +302,8 @@ sub cmd_nickchange {
 
 # send raw IRC data.
 sub cmd_irc {
-    my ($data) = required_params(1, @_) or return;
-    send_all(raw => { data => $data });
+    required_params(1, @_) or return;
+    send_all(raw => { data => join ' ', @_ });
 }
 
 # get channels from command or fall back to autojoin channels.
