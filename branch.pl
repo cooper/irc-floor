@@ -180,9 +180,10 @@ sub pong_timer {
 sub conn_timer {
     my $i = 0;
     while (my $nick = shift @nicks) {
+        last if scalar values %connection >= $config{clients_per_branch};
         $i++;
         new_connection($nick);
-        last if $i == $config{connections_in_row};
+        last if $i >= $config{connections_in_row};
     }
 }
 
