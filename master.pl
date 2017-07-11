@@ -10,15 +10,19 @@ use IO::Async::Process;
 use Data::Random::WordList;
 use List::Util   qw(shuffle sum);
 use Scalar::Util qw(weaken looks_like_number);
-use JSON qw(encode_json decode_json);
+use JSON ();
 
-our $VERSION = 0.61;
+our $VERSION = '0.62';
+
 
 ######################
 ### Initialization ###
 ######################
 
+my $json = JSON->new->allow_nonref;
 my (@nicks, %nick_used, $nick_num, %branches, $in_cmd, $not_full);
+
+# DEFAULTS
 my %config = (
     clients_per_branch  => 100,
     spaced_output       => undef,
@@ -28,9 +32,48 @@ my %config = (
     pong_timer          => 30,
     join_timer          => 10,
     pong_response       => 'pong',
-    autojoin            => ['#k'],
+    autojoin            => [],
     connections_in_row  => 50,
     word_list           => '/usr/share/dict/words'
+);
+
+# command help text
+my %cmd_help = (
+    show        => 'show a status overview of current branches',
+    create      => 'create additional clients: [amount]',
+    spawn       => 'spawn additional branch(es): [amount]',
+    say         => 'send a message to IRC channel(s): [#channels] message',
+    cycle       => 'part and join IRC channel(s): [#channels] [part message]',
+    nickchange  => 'randomly change client nicknames: [times]',
+    irc         => 'send raw data to all active connections',
+    sysinfo     => 'show information about the operating environment',
+    wastenick   => 'waste a nickname to test if the source is functioning',
+    join        => 'join IRC channels(s): #channels',
+    '@'         => 'display current configuration',
+    '?@'        => 'explain what each setting means',
+    '?'         => 'display this help text'
+);
+
+# setting help text
+my %cmd_sethelp = (
+    address             => 'str    address of the IRC server',
+    port                => 'str    port of the IRC server',
+    autojoin            => 'list   channels to join automatically',
+    clients_per_branch  => 'int    connections to attempt on a single branch',
+    max_nicks_in_ram    => 'int    number of nicknames to cache in memory',
+    connections_in_row  => 'int    max of new connections per branch per second',
+    pong_response       => 'str    what to send as the parameter in PONGs',
+    pong_timer          => 'int    how often to send PONGs to server (seconds)',
+    join_timer          => 'int    how often to send JOINs to server (seconds)',
+    word_list           => 'str    path to dictionary file on the system',
+    spaced_output       => 'bool   format table output in a more spaced layout'
+);
+
+my @huh = (
+    'huh',
+    'sorry.. im not gettin it',
+    'nice try, bucko',
+    'not quite understanding'
 );
 
 my $conf = "$ENV{HOME}/.floorrc";
@@ -60,6 +103,7 @@ sub setup {
         'type ? for help'
     );
     
+    well('All your floor are belong to us');
     accept_command();
 }
 
@@ -67,14 +111,15 @@ sub load {
     return unless -f $conf;
     local $/ = undef;
     open my $fh, '<', $conf or return;
-    my $saved = decode_json(<$fh>);
+    my $saved = $json->decode(<$fh>);
     close $fh;
     @config{ keys %$saved } = values %$saved;
 }
 
 sub save {
-    open my $fh, '>', $conf or unfortunately("can't save configuration: $!") and return;
-    print $fh encode_json(\%config);
+    open my $fh, '>', $conf
+        or unfortunately("can't save configuration: $!") and return;
+    print $fh $json->encode(\%config);
     close $fh;
 }
 
@@ -99,24 +144,23 @@ sub well_map {
     my %hash = @_;
     
     # empty set.
-    return well 'none' if !@_;
+    return well 'no active branches' if !@_;
     
     # only one pair. show as equality.
-    return well shift, ' = ', do {
-        my $v = shift;
-        ref $v ? encode_json($v) : $v;
-    } if @_ == 2;
+    return well(shift, ' = ', shift)
+        if @_ == 2;
     
     my $max  = length((sort { length $b <=> length $a } keys %hash)[0]) || 0;
     my $cute = '-' x ($max + 4);
     my (@lines, $key, $value) = $cute;
     
+    # alphabetize
+    my %h = @_;
+    @_ = map { $_ => $h{$_} } sort keys %h;
+    
     do {
-        if (defined $key) {
-            $value //= 'undef';
-            $value = encode_json($value) if ref $value;
-            push @lines, sprintf "| %${max}s | %s", $key, $value;
-        }
+        push @lines, sprintf "| %${max}s | %s", $key, $value
+            if defined $key;
         push @lines, "| ".(' ' x $max)." |" if $config{spaced_output};
     } while (($key, $value) = splice @_, 0, 2);
     
@@ -127,14 +171,14 @@ sub well_map {
 sub accept_command { $std->write("[floor] ") }
 
 # honestly: prints automated information that is not a response to anything.
-sub honestly {
+sub honestly (@) {
     $std->write("\n") unless $in_cmd;
     &well;
     accept_command() unless $in_cmd;
 }
 
 # unfortunately: confesses an error or warning.
-sub unfortunately { &honestly }
+sub unfortunately (@) { &honestly }
 
 #############
 ### Shell ###
@@ -147,8 +191,9 @@ sub handle_stdin {
         $in_cmd   = 1;
         my @split = split /\s+/, $line;
         my $cmd   = shift @split or next;
-            $cmd  = 'help'  if $cmd eq '?' or $cmd eq 'commands';
-            _set() and next if $cmd eq '@';
+            $cmd  = 'help'    if $cmd eq '?' or $cmd eq 'commands';
+            $cmd  = 'sethelp' if $cmd eq '?@';
+            _set() and next   if $cmd eq '@';
         
         # variable.
         if    ($line =~ m/^\@(\w+)$/)            { _set($1)     }
@@ -160,8 +205,7 @@ sub handle_stdin {
         }
         
         # unknown.
-        else { unfortunately 'huh' }
-        
+        else { unfortunately $huh[rand @huh], "\n", 'type ? for help' }
     }
     continue {
         accept_command();
@@ -174,8 +218,7 @@ sub cmd_sysinfo {
     well
     "this is floor v$VERSION\n",
     "running on perl ", $^V, " on ", ucfirst $^O, "\n",
-    "your dictionary $config{word_list} has $$wl{size} entries\n",
-    "All your floor are belong to us";
+    "your dictionary $config{word_list} has $$wl{size} entries";
 }
 
 # test nickname dictionary.
@@ -235,31 +278,51 @@ sub cmd_show {
         my $b = $branches{$_};
         my $clients = $b->{connected} || 0;
         my $joined  = $b->{joined}    || 0;
-        $_ => "$clients connections; $joined joined"
+        $_ => "$clients connected; $joined joined"
     } keys %branches);
 }
 
 # set or show configuration values.
 sub _set {
     my ($key, $value) = (shift, join ' ', @_);
+    
+    # @
+    # show all current values
     if (!length $key && !length $value) {
-        well_map(map { '@'.$_ => $config{$_} } keys %config);
+        well_map(map { '@'.$_ => $json->encode($config{$_}) } keys %config);
         well
-            "type sethelp for explanation\n",
+            "type ?@ for explanation of each setting\n",
             "set configuration values with: ",
             "\@key = value";
         return 1;
     }
+    
+    # @name = value
+    # set a value
     if (length $value) {
-        $value = undef if $value eq 'undef';
-        $value = eval { decode_json($value) } if
-            defined $value &&
-            $value =~ m/\{.*\}|\[.*\]/;
+        $value = 'null' if $value eq 'undef';
+        $value = eval { $json->decode($value) } if
+            defined $value;
+        if ($@) {
+            unfortunately("value syntax error\n", "$@");
+            return;
+        }
         $config{$key} = $value;
+        delete $config{$key} if !defined $value;
         send_all(config => \%config);
         save();
     }
-    well_map('@'.$key => exists $config{$key} ? $config{$key} // 'undef' : 'nonexistent');
+    
+    # @name
+    # show a value
+    well_map('@'.$key => $json->encode($config{$key}));
+}
+
+# join channel(s)
+sub cmd_join {
+    required_params(1, @_) or return;
+    my @channels = &get_channels;
+    send_all(join => { channels => \@channels });
 }
 
 # send privmsg to channel(s).
@@ -267,14 +330,14 @@ sub cmd_say {
     required_params(1, @_) or return;
     my @channels = &get_channels;
     my $message = join ' ', @_;
-    send_cmd_joined("PRIVMSG $_ :$message") foreach @channels;
+    send_channels("PRIVMSG %s :$message", @channels);
 }
 
 # part and join channel(s).
 sub cmd_cycle {
     my @channels = &get_channels;
     my $message = join ' ', @_;
-    send_cmd_all("PART $_ :$message", "JOIN $_") foreach @channels;
+    send_channels("PART %s :$message", @channels);
 }
 
 # change nicknames.
@@ -303,14 +366,18 @@ sub cmd_nickchange {
 # send raw IRC data.
 sub cmd_irc {
     required_params(1, @_) or return;
+    unfortunately 'no active branches'
+        and return if !keys %branches;
     send_all(raw => { data => join ' ', @_ });
 }
 
 # get channels from command or fall back to autojoin channels.
 sub get_channels {
-    return $_[0] && substr($_[0], 0, 1) eq '#' ?
-        split /\,/, shift :
-        @{ $config{autojoin} };
+    unfortunately 'no active branches'
+        and return if !keys %branches;
+    my @channels = $_[0] && substr($_[0], 0, 1) eq '#' ?
+        split /\,/, shift : ();
+    return @channels;
 }
 
 # show error if not enough args.
@@ -318,7 +385,11 @@ sub required_params {
     my ($n, @args) = @_;
     if (@args < $n) {
         my $s = $n > 1 ? 's' : '';
-        unfortunately("command requires $n parameter$s");
+        my $cmd = (caller 1)[3] =~ s/^(.*::)?cmd_//r;
+        unfortunately(
+            "requires $n parameter$s\n",
+            $cmd_help{$cmd}
+        );
         return;
     }
     return @args;
@@ -328,41 +399,20 @@ sub required_params {
 sub requires_number {
     my $n = shift;
     return $n if looks_like_number($n);
-    unfortunately('expected a number');
+    my $cmd = (caller 1)[3] =~ s/^(.*::)?cmd_//r;
+    unfortunately(
+        "expected a number\n",
+        $cmd_help{$cmd}
+    );
     return;
 }
 
 sub cmd_help {
-    well_map(
-        show        => 'show a status overview of current branches',
-        create      => 'create additional clients: [amount]',
-        spawn       => 'spawn additional branch(es): [amount]',
-        say         => 'send a message to IRC channel(s): [#channel] message',
-        cycle       => 'part and join IRC channel(s): [#channel] [part message]',
-        nickchange  => 'randomly change client nicknames: [times]',
-        irc         => 'send raw data to all active connections',
-        sysinfo     => 'show information about the operating environment',
-        wastenick   => 'waste a nickname to test if the source is functioning',
-        sethelp     => 'explain what each configuration value means',
-        help        => 'display this information'
-    );
+    well_map(%cmd_help);
 }
 
 sub cmd_sethelp {
-    my %c = (
-        address             => ' str) address of the IRC server',
-        port                => ' str) port of the IRC server',
-        autojoin            => 'list) channels to join automatically',
-        clients_per_branch  => ' int) connections to attempt on a single branch',
-        max_nicks_in_ram    => ' int) number of nicknames to cache in memory',
-        connections_in_row  => ' int) max of new connections per branch per second',
-        pong_response       => ' str) what to send as the parameter in PONGs',
-        pong_timer          => ' int) how often to send PONGs to server (seconds)',
-        join_timer          => ' int) how often to send JOINs to server (seconds)',
-        word_list           => ' str) path to dictionary file on the system',
-        spaced_output       => 'bool) format table output in a more spaced layout'
-    );
-    well_map(map { '@'.$_ => $c{$_} } keys %c);
+    well_map(map { '@'.$_ => $cmd_sethelp{$_} } keys %cmd_sethelp);
 }
 
 #########################
@@ -387,13 +437,15 @@ sub new_branch {
     $loop->add($branch);
 
     if (!$branch->pid) {
-        unfortunately "can't create branch: ", $branch->errstr || $@ || $! || 'idk';
+        unfortunately "can't create branch: ",
+        $branch->errstr || $@ || $! || 'idk';
         return;
     }
 
     # hold onto it.
     $branches{ $branch->pid } = $branch;
     $branch->stdout->{branch} = $branch;
+    $branch->stderr->{branch} = $branch;
     $branch->{clients} = 0;
 
     # say hello.
@@ -421,12 +473,12 @@ sub introduce {
 
 sub send_to {
     my ($branch, $command, $opts) = @_;
-    my $string = encode_json([ $command, $opts || {} ]);
+    my $string = $json->encode([ $command, $opts || {} ]);
     $branch->stdin->write("$string\n");
 }
 
 sub send_all {
-    send_to($_, @_) foreach values %branches; 
+    send_to($_, @_) foreach values %branches;
 }
 
 # send IRC command(s) on all clients.
@@ -439,6 +491,14 @@ sub send_cmd_joined {
     send_all(raw => { data => $_, joined_only => 1 }) foreach @_;
 }
 
+sub send_channels {
+    my ($line, @channels) = @_;
+    send_all(channels => {
+        line        => $line,
+        channels    => \@channels
+    });
+}
+
 ############################
 ### Branch data handling ###
 ############################
@@ -449,7 +509,7 @@ sub handle_branch {
     my $handled;
     while ($$buffer =~ s/^(.*)\r*\n+//) {
         undef $handled;
-        my ($command, $data) = @{ +eval { decode_json($1) } or next };
+        my ($command, $data) = @{ +eval { $json->decode($1) } or next };
         my $code = __PACKAGE__->can("b_$command") or next;
         $code->($branch, $data);
         $handled = 1;
@@ -463,7 +523,7 @@ sub handle_branch_err {
     my ($stream, $buffer) = @_;
     my $branch = $stream->{branch} or return;
     while ($$buffer =~ s/^(.*)\r*\n+//) {
-        unfortunately '[', $branch->pid, '] error: ', $1;
+        unfortunately '[', $branch->pid, '] ', $1;
     }
     delete $stream->{branch};
 }

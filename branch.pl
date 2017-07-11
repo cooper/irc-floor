@@ -10,14 +10,18 @@ use IO::Async::Timer::Periodic;
 use JSON qw(encode_json decode_json);
 
 my ($pong_timer, $join_timer, $updt_timer, $conn_timer);
-my (%config, @nicks, %connections, %not_joined, %joined, $started);
+my (%config, @nicks, %connections, %not_joined, %joined, $started, @channels);
 
 $SIG{PIPE} = sub {};
 
 my $loop = IO::Async::Loop->new;
 my $std  = IO::Async::Stream->new_for_stdio(on_read => \&handle_stdin);
 
+sub D (@) { return if !$ENV{FLOOR_DEBUG}; say STDERR @_ }
+
 create_timers();
+
+D 'entering loop';
 $loop->loop_forever;
 
 ##############################
@@ -50,6 +54,7 @@ sub handle_stdin {
     my ($stream, $buffer) = @_;
     while ($$buffer =~ s/^(.*)\r*\n+//) {
         my ($command, $data) = @{ decode_json($1) or next };
+        D $1;
         my $code = __PACKAGE__->can("m_$command") or next;
         $code->($data);
     }
@@ -67,7 +72,7 @@ sub m_nickchange {
     my @nicks = @{ shift->{nicks} };
     foreach my $s (values %joined) {
         my $nick = pop @nicks or last;
-        $s->write("NICK $nick\r\n");
+        send_one($s, "NICK $nick");
     }
 }
 
@@ -80,8 +85,28 @@ sub m_start {
 
 sub m_raw {
     my $data = shift;
-    $_->write("$$data{data}\r\n") foreach
-        $data->{joined_only} ? values %joined : values %connections;
+    send_joined($data->{data}) and return
+        if $data->{joined_only};
+    send_all($data->{data});
+}
+
+sub m_channels {
+    my $data = shift;
+    
+    # determine targets
+    my @send_to = @{ $data->{channels} };
+    @send_to = @channels if !@send_to;
+    my %h = map { $_ => 1 } @send_to;
+    @send_to = keys %h;
+    
+    # send
+    send_all(sprintf $data->{line}, $_) for @send_to;
+}
+
+sub m_join {
+    my @join = @{ shift->{channels} };
+    send_all("JOIN $_") for @join;
+    push @channels, @join;
 }
 
 sub new_connection {
@@ -115,10 +140,10 @@ sub new_connection {
         );
         $connections{$stream} = $not_joined{$stream} = $stream;
         $loop->add($stream);
-
-        $stream->{nick} = $nick;
-        $stream->write("NICK $nick\r\nUSER $nick $nick $nick $nick\r\n");
         
+        $stream->{nick} = $nick;
+        send_one($stream, "NICK $nick");
+        send_one($stream, "USER $nick $nick $nick $nick");
         undef $f;
     });
 }
@@ -129,6 +154,19 @@ sub connection_done {
     delete $not_joined{$stream};
     delete $joined{$stream};
     push @nicks, $stream->{nick};
+}
+
+sub send_all {
+    send_one($_, @_) for values %connections;
+}
+
+sub send_joined {
+    send_one($_, @_) for values %joined;
+}
+
+sub send_one {
+    my $stream = shift;
+    $stream->write(join '', map "$_\r\n", @_);
 }
 
 ##############
@@ -167,14 +205,15 @@ sub join_timer {
     my $channels = join ',', @{ $config{autojoin} };
     my @not_joined = values %not_joined;
     while (my $conn = shift @not_joined) {
-        $conn->write("JOIN $channels\r\n");
+        send_one($conn, "JOIN $channels");
         $joined{$conn} = $conn;
     }
+    push @channels, @{ $config{autojoin} };
     %not_joined = ();
 }
 
 sub pong_timer {
-    $_->write("PONG :$config{pong_response}\r\n") foreach values %connections;
+    send_all("PONG :$config{pong_response}");
 }
 
 sub conn_timer {
@@ -186,4 +225,3 @@ sub conn_timer {
         last if $i >= $config{connections_in_row};
     }
 }
-
