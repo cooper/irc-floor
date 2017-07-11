@@ -43,6 +43,7 @@ my %cmd_help = (
     create      => 'create additional clients: [amount]',
     spawn       => 'spawn additional branch(es): [amount]',
     say         => 'send a message to IRC channel(s): [#channels] message',
+    me          => 'send an action to IRC channel(s): [#channels] action',
     cycle       => 'part and join IRC channel(s): [#channels] [part message]',
     nickchange  => 'randomly change client nicknames: [times]',
     irc         => 'send raw data to all active connections',
@@ -339,6 +340,14 @@ sub cmd_say {
     my @channels = &get_channels;
     my $message = join ' ', @_;
     send_channels("PRIVMSG %s :$message", @channels);
+}
+
+# send action to channel(s).
+sub cmd_me {
+    required_params(1, @_) or return;
+    my @channels = &get_channels;
+    my $message = join ' ', @_;
+    send_channels("PRIVMSG %s :\1ACTION $message\1", @channels);
 }
 
 # part and join channel(s).
