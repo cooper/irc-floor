@@ -49,6 +49,7 @@ my %cmd_help = (
     sysinfo     => 'show information about the operating environment',
     wastenick   => 'waste a nickname to test if the source is functioning',
     join        => 'join IRC channels(s): #channels',
+    part        => 'leave IRC channel(s): #channels',
     '@'         => 'display current configuration',
     '?@'        => 'explain what each setting means',
     '?'         => 'display this help text'
@@ -325,6 +326,13 @@ sub cmd_join {
     send_all(join => { channels => \@channels });
 }
 
+# part channel(s)
+sub cmd_part {
+    required_params(1, @_) or return;
+    my @channels = &get_channels;
+    send_all(part => { channels => \@channels });
+}
+
 # send privmsg to channel(s).
 sub cmd_say {
     required_params(1, @_) or return;
@@ -430,7 +438,7 @@ sub new_branch {
         stdin     => { via     => 'pipe_write'        },
         on_finish => sub {
             my ($branch, $code) = @_;
-            unfortunately $branch->pid, " exited with code $code";
+            unfortunately '[', $branch->pid, '] ', " exited with code $code";
             delete $branches{ $branch->pid };
         }
     );
@@ -522,9 +530,11 @@ sub handle_branch {
 sub handle_branch_err {
     my ($stream, $buffer) = @_;
     my $branch = $stream->{branch} or return;
+    my @lines;
     while ($$buffer =~ s/^(.*)\r*\n+//) {
-        unfortunately '[', $branch->pid, '] ', $1;
+        push @lines, $1;
     }
+    unfortunately '[', $branch->pid, '] ', join "\n", @lines;
     delete $stream->{branch};
 }
 

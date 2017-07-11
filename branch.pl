@@ -109,6 +109,14 @@ sub m_join {
     push @channels, @join;
 }
 
+sub m_part {
+    my @part = @{ shift->{channels} };
+    send_all("PART $_") for @part;
+    my %h = map { $_ => 1 } @channels;
+    delete @h{@part};
+    @channels = keys %h;
+}
+
 sub new_connection {
     my $nick = shift;
     my $f = $loop->connect(
